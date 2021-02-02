@@ -1,0 +1,133 @@
+#!/usr/bin/env python3
+
+import argparse
+import os
+import sys
+
+from pathlib import Path
+
+import backends
+
+
+BACKENDS = {
+    "linode": backends.Linode
+}
+
+
+class Controller():
+    def __init__(self, backend="linode", apikey_path=None, ssh_key_path=None):
+        self.backend_id = backend
+        self.backend = BACKENDS[backend](self._get_apikey(apikey_path))
+        self.ssh_pubkey = self._get_ssh_pubkey(ssh_key_path)
+
+    def _get_ssh_pubkey(self, path=None):
+        if ret := os.environ.get(self.backend_id.upper() + "_SSH_PUBKEY"):
+            return ret
+
+        if not path:
+            # Try the default SSH key path
+            path = "~/.ssh/id_rsa.pub"
+
+        try:
+            with open(Path(path).expanduser()) as f:
+                ret = f.read().rstrip()
+        except FileNotFoundError as e:
+            print(f"Could not extract SSH key: {str(e)}", file=sys.stderr)
+            sys.exit("Either specify the SSH key as a string via the "
+                     "{backend_name + '_SSH_PUBKEY'} variable or as a file via "
+                     "the '--ssh-key' option")
+
+        return ret
+
+    def _get_apikey(self, key_file=None):
+        if key := os.environ.get(self.backend_id.upper() + "_API_KEY"):
+            return key
+
+        try:
+            with open(Path(key_file).expanduser()) as f:
+                return f.read().rstrip()
+        except Exception as e:
+            sys.exit(f"Failed to obtain the API key: {str(e)}")
+
+    def instance_create(self,
+                        instance_name,
+                        template_name,
+                        rebuild=False):
+        if rebuild:
+            self.backend.vm_rebuild(instance_name,
+                                    template_name,
+                                    self.ssh_pubkey,
+                                    sync=True)
+        else:
+            self.backend.vm_new(instance_name,
+                                template_name,
+                                self.ssh_pubkey,
+                                sync=True)
+
+    def instance_destroy(self, instance_name, delete=False):
+        if delete:
+            self.backend.vm_delete(instance_name, sync=True)
+        else:
+            self.backend.vm_stop(instance_name, sync=True)
+
+
+def action_create_instance(args):
+    Controller(apikey_path=args.api_key).instance_create(args.instance_name,
+                                                         args.template_name,
+                                                         args.rebuild)
+
+
+def action_destroy_instance(args):
+    Controller(apikey_path=args.api_key).instance_destroy(args.instance_name,
+                                                          args.delete)
+
+
+def cmdline_parser_init():
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(required=True,
+                                       dest="command")
+    parser.add_argument("--api-key",
+                        dest="api_key",
+                        metavar="FILE",
+                        help="backend API key")
+
+    start_parser = subparsers.add_parser("start",
+                                         help="start a new instance")
+    start_parser.add_argument("instance_name",
+                              help="name for the instance")
+
+    create_parser = subparsers.add_parser("create",
+                                          help="create a new instance")
+    create_parser.add_argument("instance_name",
+                               help="name for the instance")
+    create_parser.add_argument("template_name",
+                               help="template to instantiate")
+    create_parser.add_argument("--rebuild",
+                               default=False,
+                               action="store_true",
+                               help="re-instantiate an existing instance")
+    create_parser.add_argument("--ssh-key",
+                               dest="ssh_pubkey",
+                               metavar="FILE",
+                               help="SSH key to upload to the machine")
+    create_parser.set_defaults(func=action_create_instance)
+
+    delete_parser = subparsers.add_parser("destroy",
+                                          help="destroy a running instance")
+    delete_parser.add_argument("--delete",
+                               default=False,
+                               action="store_true",
+                               help="destroy a running instance")
+    delete_parser.set_defaults(func=action_destroy_instance)
+    delete_parser.add_argument("instance_name")
+    return parser
+
+
+def main():
+    parser = cmdline_parser_init()
+    args = parser.parse_args()
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    main()
